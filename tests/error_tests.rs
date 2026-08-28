@@ -37,12 +37,7 @@ fn invalid_contract_id_error_propagates() {
 
 #[test]
 fn missing_contract_id_error_propagates() {
-    let result = build_simulation_tx_envelope(
-        &[],
-        None,
-        Some("hello"),
-        &[],
-    );
+    let result = build_simulation_tx_envelope(&[], None, Some("hello"), &[]);
 
     assert!(matches!(result, Err(AppError::TxConstruction(_))));
 }
