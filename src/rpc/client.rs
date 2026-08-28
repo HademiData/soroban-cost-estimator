@@ -60,6 +60,8 @@ impl RpcClient {
             "params": params,
         });
 
+        trace!(method, "sending RPC request");
+
         let client = self.client.clone();
         let url = self.url.clone();
         let request_body = body.clone();
@@ -79,7 +81,6 @@ impl RpcClient {
             }
         })
         .await?;
-
         let status = response.status();
         let response_body: Value = response.json().await?;
         if std::env::var("SCE_DEBUG_RPC").is_ok() {
