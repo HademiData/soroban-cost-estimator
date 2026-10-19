@@ -351,6 +351,10 @@ pub enum Command {
         #[command(subcommand)]
         action: CacheAction,
     },
+    Rpc {
+        #[command(subcommand)]
+        action: RpcAction,
+    },
     Watch {
         #[arg(long, default_value = "testnet", value_parser = NetworkValueParser)]
         network: String,
@@ -378,6 +382,23 @@ pub enum WasmAction {
         wasm: PathBuf,
 
         /// Output the full parsed spec/metadata as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum RpcAction {
+    /// Check the health and network details of an RPC endpoint.
+    Health {
+        #[arg(long, default_value = "testnet")]
+        network: String,
+
+        /// Explicit RPC URL (overrides network-based resolution).
+        #[arg(long)]
+        rpc_url: Option<String>,
+        /// Output the health report as JSON.
+        /// Output the health report as JSON.
         #[arg(long)]
         json: bool,
     },
