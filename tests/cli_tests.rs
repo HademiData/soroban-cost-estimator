@@ -69,8 +69,8 @@ fn spawn_rpc_health_stub(health_status: &'static str) -> String {
                 .set_read_timeout(Some(std::time::Duration::from_secs(2)))
                 .expect("set RPC stub read timeout");
             let request = read_http_request(&mut stream);
-            let request: serde_json::Value = serde_json::from_slice(&request)
-                .expect("parse JSON-RPC request");
+            let request: serde_json::Value =
+                serde_json::from_slice(&request).expect("parse JSON-RPC request");
             let result = match request["method"].as_str().expect("RPC method") {
                 "getHealth" => serde_json::json!({ "status": health_status }),
                 "getNetwork" => serde_json::json!({
@@ -252,7 +252,10 @@ fn test_rpc_health_json_reports_endpoint_details() {
     assert_eq!(code, 0, "healthy RPC should exit 0; stderr: {stderr}");
     let report: serde_json::Value = serde_json::from_str(&stdout).expect("health JSON");
     assert_eq!(report["status"], "healthy");
-    assert_eq!(report["network_passphrase"], "Test SDF Network ; September 2015");
+    assert_eq!(
+        report["network_passphrase"],
+        "Test SDF Network ; September 2015"
+    );
     assert_eq!(report["protocol_version"], 23);
     assert_eq!(report["core_version"], "stellar-core 23.0.0");
     assert!(report["latency_ms"].is_number());
@@ -1068,7 +1071,7 @@ fn test_estimate_nonexistent_wasm_file() {
         "a missing WASM file should exit 1; stderr: {stderr}"
     );
     assert!(
-        stderr.starts_with("Error:"),
+        stderr.lines().any(|line| line.starts_with("Error:")),
         "runtime failures are reported on stderr as `Error: …`; got: {stderr}"
     );
     assert!(

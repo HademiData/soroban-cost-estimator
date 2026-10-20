@@ -1816,7 +1816,10 @@ mod tests {
             .await
             .expect("network details deserialize");
 
-        assert_eq!(network.network_passphrase, "Test SDF Network ; September 2015");
+        assert_eq!(
+            network.network_passphrase,
+            "Test SDF Network ; September 2015"
+        );
         assert_eq!(network.protocol_version, 23);
     }
 

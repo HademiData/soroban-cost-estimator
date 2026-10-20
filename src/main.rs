@@ -217,6 +217,7 @@ async fn main() {
         "info"
     };
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_level)),
         )
@@ -227,8 +228,8 @@ async fn main() {
     }
 
     if let Err(err) = run(args).await {
-        error!(error = %err, "command failed");
         eprintln!("Error: {err}");
+        error!(error = %err, "command failed");
         std::process::exit(1);
     }
 }
@@ -688,7 +689,7 @@ async fn cmd_rpc_health(
         max_retries,
         headers,
         verbose,
-    );
+    )?;
 
     let started = std::time::Instant::now();
     let health = match client.get_health().await {
@@ -779,7 +780,10 @@ fn print_rpc_health_report(report: &RpcHealthReport, json: bool) -> error::AppRe
         println!("Health Status: {}", report.status);
         println!(
             "Network Passphrase: {}",
-            report.network_passphrase.as_deref().unwrap_or("Unavailable")
+            report
+                .network_passphrase
+                .as_deref()
+                .unwrap_or("Unavailable")
         );
         println!(
             "Protocol Version: {}",
