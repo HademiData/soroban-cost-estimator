@@ -275,6 +275,7 @@ async fn run(args: cli::Cli) -> error::AppResult<()> {
             no_cache,
             history,
             json,
+            fail_on_warning,
             auto_snapshot,
             diff,
             wasm_new,
@@ -292,6 +293,12 @@ async fn run(args: cli::Cli) -> error::AppResult<()> {
             };
             let paths = resolve_wasm_paths(&wasm, wasm_dir.as_deref())?;
             if wasm.len() > 1 || wasm_dir.is_some() {
+                if fail_on_warning {
+                    return Err(error::AppError::General(
+                        "--fail-on-warning is not supported for multi-WASM batch estimates"
+                            .to_string(),
+                    ));
+                }
                 // Multi-contract run: aggregate every contract into a single
                 // batch summary instead of printing per-invocation reports.
                 cmd_batch(
@@ -348,6 +355,7 @@ async fn run(args: cli::Cli) -> error::AppResult<()> {
                     wasm_new.as_deref(),
                     dry_run,
                     project.as_deref(),
+                    fail_on_warning,
                 )
                 .await
             }
@@ -361,6 +369,7 @@ async fn run(args: cli::Cli) -> error::AppResult<()> {
             no_cache,
             fn_names,
             json,
+            fail_on_warning,
             auto_snapshot,
         } => {
             let format = match (args.format, json) {
@@ -370,6 +379,12 @@ async fn run(args: cli::Cli) -> error::AppResult<()> {
             };
             let paths = resolve_wasm_paths(&wasm, wasm_dir.as_deref())?;
             if wasm.len() > 1 || wasm_dir.is_some() {
+                if fail_on_warning {
+                    return Err(error::AppError::General(
+                        "--fail-on-warning is not supported for multi-WASM batch estimates"
+                            .to_string(),
+                    ));
+                }
                 cmd_batch(
                     &paths,
                     &env_string(network, &default_network, "SOROBAN_NETWORK"),
@@ -412,6 +427,7 @@ async fn run(args: cli::Cli) -> error::AppResult<()> {
                     args.wasm_info,
                     args.verbose,
                     auto_snapshot,
+                    fail_on_warning,
                 )
                 .await
             }
@@ -785,6 +801,7 @@ enum EstimateRun {
     /// A fresh simulation produced a full [`report::cost_report::CostReport`].
     Simulated {
         report: report::cost_report::CostReport,
+        wasm_warning: Option<String>,
         /// The estimate cached under the same key *before* this run, when
         /// `--compare` asked for it. `None` means there was no baseline.
         previous: Option<cache::CachedEstimate>,
@@ -1056,6 +1073,7 @@ async fn cmd_estimate(
     wasm_new: Option<&str>,
     dry_run: bool,
     project: Option<&str>,
+    fail_on_warning: bool,
 ) -> error::AppResult<()> {
     // Parse the requested projection counts up front so an invalid list is
     // rejected before any RPC traffic, regardless of the output format.
@@ -1063,6 +1081,12 @@ async fn cmd_estimate(
         Some(s) => Some(report::cost_report::parse_projection_counts(s)?),
         None => None,
     };
+
+    if fail_on_warning && (diff || watch || repeat > 1 || dry_run) {
+        return Err(error::AppError::General(
+            "--fail-on-warning is supported only for a single completed estimate; it cannot be used with --diff, --watch, --repeat, or --dry-run".to_string(),
+        ));
+    }
 
     // `--wasm-new` is only meaningful together with `--diff`; silently
     // ignoring it would produce a single report the user did not ask for.
@@ -1129,7 +1153,7 @@ async fn cmd_estimate(
             fn_name,
             args,
             interactive_flag,
-            cache_ttl,
+            if fail_on_warning { None } else { cache_ttl },
             clear_cache,
             no_cache,
             history,
@@ -1159,7 +1183,7 @@ async fn cmd_estimate(
         fn_name,
         args,
         interactive_flag,
-        cache_ttl,
+        if fail_on_warning { None } else { cache_ttl },
         compare,
         clear_cache,
         no_cache,
@@ -1179,6 +1203,7 @@ async fn cmd_estimate(
     )
     .await?;
 
+    let mut warnings = Vec::new();
     // `--dry-run` promises no network access, so bail before the rendering and
     // before the auto-snapshot guard (which fetches live pricing config).
     if matches!(run, EstimateRun::DryRun) {
@@ -1186,9 +1211,19 @@ async fn cmd_estimate(
     }
 
     if let EstimateRun::Simulated {
-        report, previous, ..
+        report,
+        previous,
+        wasm_warning,
     } = &mut run
     {
+        warnings.extend(
+            report
+                .warnings
+                .iter()
+                .map(|warning| warning.message.clone()),
+        );
+        warnings.extend(wasm_warning.iter().cloned());
+
         // Attach batch cost projections before rendering so every output
         // format (table, markdown, json, csv) sees the same report.
         if let Some(ref counts) = projection_counts {
@@ -1278,7 +1313,21 @@ async fn cmd_estimate(
             eprintln!("Warning: auto-snapshot failed: {e}");
         }
     }
-    Ok(())
+    fail_on_warnings(&warnings, fail_on_warning, "estimate")
+}
+
+fn fail_on_warnings(warnings: &[String], enabled: bool, workflow: &str) -> error::AppResult<()> {
+    if !enabled || warnings.is_empty() {
+        return Ok(());
+    }
+
+    for warning in warnings {
+        eprintln!("Warning: {warning}");
+    }
+    Err(error::AppError::General(format!(
+        "{workflow} completed with {} warning(s); failing because --fail-on-warning was set",
+        warnings.len()
+    )))
 }
 
 /// `estimate --repeat` benchmarking: run the simulation N times and report
@@ -1711,6 +1760,7 @@ async fn estimate_once(
 
         info!("loading WASM");
         let wasm_info = wasm::parser::load_wasm(std::path::Path::new(wasm_path))?;
+        let wasm_warning = wasm::parser::validate_wasm_memory_limits(&wasm_info.bytes);
         debug!(
             functions = wasm_info.functions.len(),
             has_spec = wasm_info.has_spec,
@@ -1920,7 +1970,11 @@ async fn estimate_once(
             "estimate complete"
         );
 
-        Ok(EstimateRun::Simulated { report, previous })
+        Ok(EstimateRun::Simulated {
+            report,
+            wasm_warning,
+            previous,
+        })
     }
     .instrument(span)
     .await
@@ -2885,6 +2939,7 @@ async fn cmd_estimate_all(
     wasm_info_flag: bool,
     verbose: bool,
     auto_snapshot: bool,
+    fail_on_warning: bool,
 ) -> error::AppResult<()> {
     use tracing::Instrument;
     use tracing::info_span;
@@ -2892,6 +2947,7 @@ async fn cmd_estimate_all(
     let span = info_span!("cmd_estimate_all", wasm_path, network);
     async {
         let wasm_info = wasm::parser::load_wasm(std::path::Path::new(wasm_path))?;
+        let wasm_warning = wasm::parser::validate_wasm_memory_limits(&wasm_info.bytes);
         let json_flag = format == "json";
         emit_wasm_structure(&wasm_info, verbose, wasm_info_flag, json_flag);
 
@@ -3004,6 +3060,8 @@ async fn cmd_estimate_all(
 
         let mut json_results: Vec<EstimateAllResult> = Vec::new();
         let mut csv_rows: Vec<String> = Vec::new();
+        let mut warning_messages = Vec::new();
+        warning_messages.extend(wasm_warning);
         let total = selected.len();
         debug!(total, "enumerated functions");
 
@@ -3026,6 +3084,12 @@ async fn cmd_estimate_all(
                 precision,
             )
             .await?;
+            warning_messages.extend(
+                result
+                    .warnings
+                    .iter()
+                    .map(|warning| warning.message.clone()),
+            );
             if format == "csv" {
                 let row = csv_row(&result);
                 csv_rows.push(row);
@@ -3104,7 +3168,7 @@ async fn cmd_estimate_all(
             }
         }
 
-        Ok(())
+        fail_on_warnings(&warning_messages, fail_on_warning, "estimate-all")
     }
     .instrument(span)
     .await
@@ -5088,6 +5152,7 @@ async fn cmd_cache_warm(
         false,
         verbose,
         false,
+        false,
     )
     .await
 }
@@ -5433,6 +5498,7 @@ mod tests {
     use super::EstimateAllJsonReport;
     use super::EstimateAllResult;
     use super::EstimateAllStatus;
+    use super::fail_on_warnings;
     use super::parse_interval_secs;
     use super::settled_new_build_detected;
     use super::upgrade_detected;
@@ -5440,6 +5506,13 @@ mod tests {
     use super::wasm_info_json;
     use super::watch_build_header;
     use super::watch_cost_delta;
+
+    #[test]
+    fn test_fail_on_warnings_only_fails_when_enabled_and_present() {
+        assert!(fail_on_warnings(&[], true, "estimate").is_ok());
+        assert!(fail_on_warnings(&["resource near limit".to_string()], false, "estimate").is_ok());
+        assert!(fail_on_warnings(&["resource near limit".to_string()], true, "estimate").is_err());
+    }
     use soroban_cost_estimator::config_snapshot::diff;
     use soroban_cost_estimator::config_snapshot::model::{
         ConfigSnapshot, ContractComputeV0, ContractLedgerCostV0,
