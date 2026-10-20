@@ -157,5 +157,10 @@ so consumers can tell how fresh an estimate is. The human-readable header
 renders the same value with thousands separators as
 `Simulated at ledger sequence: 3,961,544`.
 
+For batch runs (repeated `--wasm` inputs or `--wasm-dir`), `--format ndjson`
+emits one JSON object per contract. `estimate-all` emits one object per
+function. Error records are included and processing continues; progress and
+diagnostics go to stderr.
+
 Use `--format json`, `--format csv`, or `--format markdown` when feeding the result into CI, spreadsheets, or documentation. `--json` remains a backward-compatible alias for `--format json`. The
 result is also written to the estimate cache(see [Caching](../concepts/caching.md)).

@@ -42,6 +42,7 @@ pub enum OutputFormat {
     #[default]
     Table,
     Json,
+    Ndjson,
     Csv,
     Markdown,
 }
@@ -52,6 +53,7 @@ impl OutputFormat {
         match self {
             Self::Table => "table",
             Self::Json => "json",
+            Self::Ndjson => "ndjson",
             Self::Csv => "csv",
             Self::Markdown => "markdown",
         }
@@ -93,7 +95,8 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "PATH")]
     pub config: Option<String>,
 
-    /// Select output format for commands that produce structured output (table, json, csv, markdown).
+    /// Select output format for structured reports (table, json, csv, markdown).
+    /// NDJSON is supported for multi-item estimate and estimate-all runs.
     #[arg(long, global = true, value_enum)]
     pub format: Option<OutputFormat>,
 

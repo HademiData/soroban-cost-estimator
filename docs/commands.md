@@ -35,9 +35,11 @@ management**.
 > or `estimate-all` evaluates every resolved contract in one run and prints an
 > aggregated multi-contract summary (function count, upload cost, and min/max
 > invocation fees per contract) instead of per-invocation output. `--json`
-> emits a structured batch report, and a contract that fails is reported in the
-> summary without aborting the rest of the run. In batch mode the `\*` above
-> marks the two WASM sources: supply at least one.
+> emits a structured batch report, while `--format ndjson` emits one JSON
+> object per contract (`estimate`) or function (`estimate-all`). Failed
+> contracts/functions are included as records and processing continues; progress
+> and diagnostics are written to stderr. In batch mode the `\*` above marks the
+> two WASM sources: supply at least one.
 
 ### `estimate`
 
@@ -67,7 +69,7 @@ soroban-cost-estimator estimate [OPTIONS] --wasm <WASM>
 | `--diff` | | | `false` | Compare two WASM builds side by side. Requires `--wasm-new` |
 | `--wasm-new <PATH>` | | | — | The "new" WASM build to compare against when `--diff` is set |
 | `--json` | | | `false` | Output as JSON instead of a human-readable table |
-| `--format <FORMAT>` | | | `table` | Output format: `table`, `json`, `csv`, or `markdown` (overrides `--json`) |
+| `--format <FORMAT>` | | | `table` | Output format: `table`, `json`, `csv`, or `markdown` (overrides `--json`); `ndjson` is for multi-item estimates |
 | `--precision <N>` | | | `7` | Decimal places for XLM fee values (`0..=18`) |
 | `--help` | `-h` | | | Print help |
 
@@ -975,7 +977,7 @@ All commands accept:
 |------|-------------|
 | `--rps <N>` | Cap RPC requests at N per second (0 disables) |
 | `--timeout <SECS>` | HTTP request timeout for RPC calls in seconds (default `30`) |
-| `--format <FORMAT>` | Report format for commands that support it: `table`, `json`, `csv`, or `markdown` |
+| `--format <FORMAT>` | Report format for commands that support it: `table`, `json`, `csv`, or `markdown`; NDJSON is available for estimate batches |
 | `--help` / `-h` | Print command-specific help |
 
 `--format` applies to report-producing commands. The legacy `--json` flag remains supported as an alias for `--format json` where it was previously available.
