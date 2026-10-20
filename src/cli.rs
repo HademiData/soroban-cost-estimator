@@ -827,4 +827,30 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_rpc_health_command_accepts_network_and_rpc_url() {
+        let cli = Cli::try_parse_from([
+            "soroban-cost-estimator",
+            "rpc",
+            "health",
+            "--network",
+            "mainnet",
+            "--rpc-url",
+            "https://rpc.example.com",
+            "--json",
+        ])
+        .expect("rpc health arguments parse");
+
+        assert!(matches!(
+            cli.command,
+            Command::Rpc {
+                action: RpcAction::Health {
+                    network,
+                    rpc_url: Some(rpc_url),
+                    json: true,
+                }
+            } if network == "mainnet" && rpc_url == "https://rpc.example.com"
+        ));
+    }
 }

@@ -709,7 +709,6 @@ async fn cmd_rpc_health(
             });
         }
     };
-    let latency_ms = started.elapsed().as_millis();
 
     let network_info = match client.get_network().await {
         Ok(info) => info,
@@ -719,7 +718,7 @@ async fn cmd_rpc_health(
                 network_passphrase: None,
                 protocol_version: None,
                 core_version: None,
-                latency_ms,
+                latency_ms: started.elapsed().as_millis(),
                 error: Some(format!("unable to fetch network details: {err}")),
             };
             print_rpc_health_report(&report, json)?;
@@ -738,7 +737,7 @@ async fn cmd_rpc_health(
                 network_passphrase: Some(network_info.network_passphrase),
                 protocol_version: Some(network_info.protocol_version),
                 core_version: None,
-                latency_ms,
+                latency_ms: started.elapsed().as_millis(),
                 error: Some(format!("unable to fetch Core version: {err}")),
             };
             print_rpc_health_report(&report, json)?;
@@ -755,7 +754,7 @@ async fn cmd_rpc_health(
         network_passphrase: Some(network_info.network_passphrase),
         protocol_version: Some(network_info.protocol_version),
         core_version: version_info.captive_core_version,
-        latency_ms,
+        latency_ms: started.elapsed().as_millis(),
         error: None,
     };
     print_rpc_health_report(&report, json)?;
