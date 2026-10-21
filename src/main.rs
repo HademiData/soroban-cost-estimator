@@ -633,18 +633,22 @@ async fn run(args: cli::Cli) -> error::AppResult<()> {
             )
             .await
         }
-        cli::Command::Completions { shell } => {
-            cmd_completions(shell);
-            Ok(())
-        }
+        cli::Command::Completions { shell } => cmd_completions(shell),
     }
 }
 
 /// `completions` command: generate shell completion script to stdout.
-fn cmd_completions(shell: clap_complete::Shell) {
-    let mut cmd = cli::Cli::command();
-    let bin_name = cmd.get_name().to_string();
-    clap_complete::generate(shell, &mut cmd, bin_name, &mut std::io::stdout());
+fn cmd_completions(shell: clap_complete::Shell) -> error::AppResult<()> {
+    std::thread::Builder::new()
+        .name("completion-generator".to_string())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let mut cmd = cli::Cli::command();
+            let bin_name = cmd.get_name().to_string();
+            clap_complete::generate(shell, &mut cmd, bin_name, &mut std::io::stdout());
+        })?
+        .join()
+        .map_err(|_| error::AppError::General("completion generation thread panicked".to_string()))
 }
 
 /// True when a simulation response carried neither cost data, nor
