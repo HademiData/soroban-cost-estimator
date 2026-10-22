@@ -183,6 +183,19 @@ fn default_format(file: &config::UserConfig) -> cli::OutputFormat {
     }
 }
 
+/// Coerce a requested output format to one an *aggregate* command can render.
+///
+/// `summary` (#533) describes one `CostReport`, so the commands that only build
+/// aggregates — `estimate-all` and multi-contract batch runs — fall back to
+/// their `table` output instead of silently printing nothing. The single
+/// `estimate` path keeps the summary format.
+fn aggregate_format(format: cli::OutputFormat) -> cli::OutputFormat {
+    match format {
+        cli::OutputFormat::Summary => cli::OutputFormat::Table,
+        other => other,
+    }
+}
+
 fn env_string(cli_value: String, file_value: &str, env: &str) -> String {
     let val = std::env::var(env).unwrap_or(cli_value);
     let trimmed = val.trim();
@@ -325,6 +338,7 @@ async fn run(args: cli::Cli, file: error::AppResult<config::UserConfig>) -> erro
             cache_ttl,
             compare,
             clear_cache,
+            recover_cache,
             no_cache,
             history,
             json,
@@ -337,6 +351,17 @@ async fn run(args: cli::Cli, file: error::AppResult<config::UserConfig>) -> erro
             project,
             repeat,
         } => {
+            if recover_cache {
+                if let Ok(false) = cache::check_cache_health() {
+                    let rep = cache::recover_cache(true)?;
+                    if !args.quiet {
+                        eprintln!(
+                            "Quarantined corrupt cache database to {} and initialized fresh cache.",
+                            rep.backup_path.display()
+                        );
+                    }
+                }
+            }
             // `--format` wins when both it and the legacy `--json` flag are
             // supplied; otherwise fall back to the JSON/table defaults.
             let format = match (args.format, json) {
@@ -362,7 +387,7 @@ async fn run(args: cli::Cli, file: error::AppResult<config::UserConfig>) -> erro
                     id.as_deref(),
                     r#fn.as_deref(),
                     &contract_args,
-                    format.as_str(),
+                    aggregate_format(format).as_str(),
                     rps,
                     timeout,
                     connect_timeout,
@@ -446,7 +471,7 @@ async fn run(args: cli::Cli, file: error::AppResult<config::UserConfig>) -> erro
                     id.as_deref(),
                     None,
                     &[],
-                    format.as_str(),
+                    aggregate_format(format).as_str(),
                     rps,
                     timeout,
                     connect_timeout,
@@ -469,7 +494,7 @@ async fn run(args: cli::Cli, file: error::AppResult<config::UserConfig>) -> erro
                     id.as_deref(),
                     no_cache,
                     &fn_names,
-                    format.as_str(),
+                    aggregate_format(format).as_str(),
                     rps,
                     timeout,
                     connect_timeout,
@@ -693,17 +718,22 @@ async fn run(args: cli::Cli, file: error::AppResult<config::UserConfig>) -> erro
 }
 
 /// `completions` command: generate shell completion script to stdout.
-fn cmd_completions(shell: clap_complete::Shell) -> error::AppResult<()> {
-    std::thread::Builder::new()
-        .name("completion-generator".to_string())
-        .stack_size(8 * 1024 * 1024)
-        .spawn(move || {
-            let mut cmd = cli::Cli::command();
-            let bin_name = cmd.get_name().to_string();
-            clap_complete::generate(shell, &mut cmd, bin_name, &mut std::io::stdout());
-        })?
-        .join()
-        .map_err(|_| error::AppError::General("completion generation thread panicked".to_string()))
+fn cmd_completions(shell: clap_complete::Shell) {
+    // Windows default main-thread stack size is 1MB, which can overflow when generating completions
+    // for deep Clap command trees in debug/unoptimized mode. Run with an 8MB stack to ensure safety across platforms.
+    let builder = std::thread::Builder::new().stack_size(8 * 1024 * 1024);
+    let handler = builder.spawn(move || {
+        let mut cmd = cli::Cli::command();
+        let bin_name = cmd.get_name().to_string();
+        clap_complete::generate(shell, &mut cmd, bin_name, &mut std::io::stdout());
+    });
+    if let Ok(handle) = handler {
+        let _ = handle.join();
+    } else {
+        let mut cmd = cli::Cli::command();
+        let bin_name = cmd.get_name().to_string();
+        clap_complete::generate(shell, &mut cmd, bin_name, &mut std::io::stdout());
+    }
 }
 
 /// True when a simulation response carried neither cost data, nor
@@ -958,6 +988,19 @@ struct SimulationRequest<'a> {
     verbose: bool,
 }
 
+/// A `simulateTransaction` failure with no RPC-provided error code or details.
+///
+/// Used when the call itself succeeded but the response carried no usable
+/// simulation data. Failures the RPC *reported* travel through
+/// [`error::AppError::SimulationFailed`] with the structured
+/// [`rpc::simulate::SimulationError`] that carries the code and payload
+/// (issue #532).
+fn simulation_failed(message: impl Into<String>) -> error::AppError {
+    error::AppError::SimulationFailed(Box::new(rpc::simulate::SimulationError::new(
+        message.into(),
+    )))
+}
+
 /// Simulate one WASM artifact and build its [`report::cost_report::CostReport`].
 ///
 /// Shared core of `estimate` and `estimate --diff`: build the transaction
@@ -1017,10 +1060,10 @@ async fn simulate_report(
     // slow RPC endpoints. Includes any retries performed by the client.
     let rpc_start = std::time::Instant::now();
     let response = rpc::simulate::simulate_transaction(&client, &tx_b64).await?;
-    let rpc_latency_ms = rpc_start.elapsed().as_millis() as u64;
+    let simulation_duration_ms = rpc_start.elapsed().as_millis() as u64;
 
     if missing_simulation_data(&response) {
-        return Err(error::AppError::SimulationFailed(
+        return Err(simulation_failed(
             "simulation returned no cost data and no latest ledger â€” check --id, --fn, and the RPC endpoint".to_string(),
         ));
     }
@@ -1083,7 +1126,7 @@ async fn simulate_report(
         fee,
         ledger: latest_ledger,
         network: req.network.to_string(),
-        rpc_latency_ms,
+        simulation_duration_ms,
         rates: Some(fee_rates),
         warnings,
         history: None,
@@ -1497,7 +1540,7 @@ async fn cmd_estimate_repeat(
         if let Some(fresh) = fresh {
             let ttl_secs = ttl_secs.unwrap_or_default();
             info!(ttl_secs, function = %function_name, "cache hit — reusing fresh estimate");
-            print_cached_estimate(&fresh, ttl_secs, json_flag, precision, quiet);
+            print_cached_estimate(&fresh, ttl_secs, format, precision, quiet);
             return Ok(());
         }
 
@@ -1593,10 +1636,10 @@ async fn cmd_estimate_repeat(
             let rpc_start = std::time::Instant::now();
             let response =
                 rpc::simulate::simulate_transaction_uncached(&client, &tx_b64).await?;
-            let rpc_latency_ms = rpc_start.elapsed().as_millis() as u64;
+            let simulation_duration_ms = rpc_start.elapsed().as_millis() as u64;
 
             if missing_simulation_data(&response) {
-                return Err(error::AppError::SimulationFailed(
+                return Err(simulation_failed(
                     "simulation returned no cost data and no latest ledger — check --id, --fn, and the RPC endpoint".to_string(),
                 ));
             }
@@ -1619,7 +1662,7 @@ async fn cmd_estimate_repeat(
                 )?)
                 .unwrap_or(0);
 
-            latencies_ms.push(rpc_latency_ms);
+            latencies_ms.push(simulation_duration_ms);
 
             match first_cpu {
                 Some(prev) if prev != cpu_instructions => cpu_identical = false,
@@ -1642,7 +1685,7 @@ async fn cmd_estimate_repeat(
                 iteration,
                 cpu_instructions,
                 total_fee_stroops,
-                rpc_latency_ms,
+                simulation_duration_ms,
                 "simulation iteration complete"
             );
 
@@ -1669,7 +1712,7 @@ async fn cmd_estimate_repeat(
                         fee.total_stroops,
                         cpu_instructions,
                         memory_bytes,
-                        Some(rpc_latency_ms),
+                        Some(simulation_duration_ms),
                         true,
                         health_metadata.network_passphrase.as_deref(),
                         health_metadata.core_version.as_deref(),
@@ -1692,7 +1735,7 @@ async fn cmd_estimate_repeat(
                     fee,
                     ledger: latest_ledger,
                     network: network.to_string(),
-                    rpc_latency_ms,
+                    simulation_duration_ms,
                     rates: Some(fee_rates),
                     warnings: Vec::new(),
                     history: None,
@@ -1793,6 +1836,10 @@ async fn estimate_once(
     dry_run: bool,
 ) -> error::AppResult<EstimateRun> {
     let json_flag = format == "json";
+    // Formats whose stdout is consumed by a script (`json`, `summary`) keep
+    // every diagnostic — WASM structure, optimization tips — on stderr, so
+    // `--format summary` really is one result line.
+    let machine_mode = json_flag || format == "summary";
     let table_mode = format == "table";
     use tracing::{Instrument, info_span};
 
@@ -1827,8 +1874,8 @@ async fn estimate_once(
             has_spec = wasm_info.has_spec,
             "WASM loaded"
         );
-        emit_wasm_structure(&wasm_info, verbose, wasm_info_flag, json_flag);
-        maybe_emit_optimization_tip(&wasm_info, quiet, json_flag);
+        emit_wasm_structure(&wasm_info, verbose, wasm_info_flag, machine_mode);
+        maybe_emit_optimization_tip(&wasm_info, quiet, machine_mode);
 
         // Interactive mode: resolve the function, arguments, and contract ID
         // by prompting on stdin, using the contract spec for names and
@@ -1891,7 +1938,7 @@ async fn estimate_once(
         if let Some(fresh) = fresh {
             let ttl_secs = ttl_secs.unwrap_or_default();
             info!(ttl_secs, function = %function_name, "cache hit â€” reusing fresh estimate");
-            print_cached_estimate(&fresh, ttl_secs, json_flag, precision, quiet);
+            print_cached_estimate(&fresh, ttl_secs, format, precision, quiet);
             return Ok(EstimateRun::Cached);
         }
 
@@ -1982,6 +2029,16 @@ async fn estimate_once(
         })
         .await?;
 
+        // The ledger I/O footprint this run consumed. It is recorded in the
+        // cache so a later `--history` run can explain a fee change by the
+        // ledger access behind it, not by the fee alone (#530).
+        let io = cache::IoFootprint {
+            read_entries: report.read_entries,
+            write_entries: report.write_entries,
+            read_bytes: report.read_bytes,
+            write_bytes: report.write_bytes,
+        };
+
         // Load up to 5 previous runs for the trend table (#321). This must
         // happen before the cache write below so the current run is not
         // counted as its own history entry.
@@ -1998,11 +2055,15 @@ async fn estimate_once(
                     ledger: run.ledger,
                     cpu_instructions: run.cpu_instructions,
                     total_stroops: run.total_stroops,
+                    // Legacy rows have no footprint; `build_history_entries`
+                    // reports those as unavailable instead of zero.
+                    io: run.io,
                 })
                 .collect();
             let entries = report::cost_report::build_history_entries(
                 report.fee.total_stroops,
                 precision,
+                Some(io),
                 &historical,
             );
             info!(entries = entries.len(), "loaded cost history");
@@ -2012,7 +2073,7 @@ async fn estimate_once(
         // `--no-cache` also suppresses the write, so a bypassed run leaves
         // no trace in the local cache.
         if !no_cache {
-            let _ = cache::save_estimate(
+            let _ = cache::save_estimate_with_io(
                 &wasm_hash,
                 function_name,
                 args,
@@ -2021,7 +2082,8 @@ async fn estimate_once(
                 report.fee.total_stroops,
                 report.cpu_instructions,
                 report.memory_bytes,
-                Some(report.rpc_latency_ms),
+                io,
+                Some(report.simulation_duration_ms),
                 true,
             );
         }
@@ -4442,19 +4504,24 @@ fn fresh_cached_estimate(
 /// Print a fresh cached estimate that `estimate` is reusing instead of
 /// re-simulating.
 ///
+/// `format` decides both the shape and the stream: `json` emits the cache-hit
+/// document, the human formats (`table`, `markdown`) emit the two-line notice,
+/// and the machine formats (`csv`, `summary`) emit that same notice on
+/// **stderr** so stdout carries nothing but the format's own result.
+///
 /// # Network calls
 /// None â€” pure output.
 fn print_cached_estimate(
     fresh: &cache::CachedEstimate,
     ttl_secs: u64,
-    json_flag: bool,
+    format: &str,
     precision: u32,
     quiet: bool,
 ) {
     if quiet {
         return;
     }
-    if json_flag {
+    if format == "json" {
         println!(
             "{}",
             serde_json::json!({
@@ -4470,19 +4537,28 @@ fn print_cached_estimate(
                 "timestamp": fresh.timestamp,
             })
         );
+        return;
+    }
+
+    let notice = format!(
+        "Cache hit â€” estimate from {} is still fresh (TTL {ttl_secs}s); skipping simulation.",
+        fresh.timestamp
+    );
+    let details = format!(
+        "  Total fee: {} stroops ({} XLM) | CPU: {} insns | Mem: {} bytes | Ledger: {}",
+        fresh.total_stroops,
+        report::fee_calc::stroops_to_xlm(fresh.total_stroops, precision),
+        fresh.cpu_instructions,
+        fresh.memory_bytes,
+        fresh.ledger,
+    );
+
+    if matches!(format, "table" | "markdown") {
+        println!("{notice}");
+        println!("{details}");
     } else {
-        println!(
-            "Cache hit â€” estimate from {} is still fresh (TTL {ttl_secs}s); skipping simulation.",
-            fresh.timestamp
-        );
-        println!(
-            "  Total fee: {} stroops ({} XLM) | CPU: {} insns | Mem: {} bytes | Ledger: {}",
-            fresh.total_stroops,
-            report::fee_calc::stroops_to_xlm(fresh.total_stroops, precision),
-            fresh.cpu_instructions,
-            fresh.memory_bytes,
-            fresh.ledger,
-        );
+        eprintln!("{notice}");
+        eprintln!("{details}");
     }
 }
 
@@ -5124,7 +5200,34 @@ async fn handle_cache_action(
             quiet,
         ),
         cli::CacheAction::Stats { json } => cmd_cache_stats(json, quiet),
+        cli::CacheAction::Recover { force, json } => cmd_cache_recover(force, json, quiet),
     }
+}
+
+/// `cache recover` command: quarantine a corrupt SQLite cache database to a timestamped backup and initialize a fresh cache.
+fn cmd_cache_recover(force: bool, json: bool, quiet: bool) -> error::AppResult<()> {
+    // Perform non-destructive cache recovery, preserving corrupt files for inspection.
+    let report = cache::recover_cache(force)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else if !quiet {
+        println!("Cache recovery complete:");
+        println!(
+            "  Quarantined corrupt database: {}",
+            report.backup_path.display()
+        );
+        for sidecar in &report.sidecars_quarantined {
+            println!("  Quarantined sidecar:          {}", sidecar.display());
+        }
+        println!(
+            "  Initialized fresh cache database: {}",
+            report.new_path.display()
+        );
+        println!(
+            "Notice: Previously cached estimates have been reset; the original file has been preserved for inspection."
+        );
+    }
+    Ok(())
 }
 
 /// Builds a cache filter from the CLI flags shared by `cache list` and
@@ -5638,7 +5741,7 @@ async fn simulate_envelope(
     let response = rpc::simulate::simulate_transaction(client, &tx_b64).await?;
 
     if missing_simulation_data(&response) {
-        return Err(error::AppError::SimulationFailed(
+        return Err(simulation_failed(
             "simulation returned no cost data — check --id and the RPC endpoint".to_string(),
         ));
     }
@@ -6388,7 +6491,7 @@ mod tests {
             },
             ledger: 3_894_195,
             network: "testnet".to_string(),
-            rpc_latency_ms: 87,
+            simulation_duration_ms: 87,
             rates: None,
             warnings: Vec::new(),
             history: None,
